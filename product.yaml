@@ -1,538 +1,244 @@
----
-# Copyright 2018 widdix GmbH
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'VPC: with 3 AZ and private and public subnet'
-Metadata:
-  'AWS::CloudFormation::Interface':
-    ParameterGroups:
-    - Label:
-        default: 'VPC Parameters'
-      Parameters:
-      - ClassB
+Description: "Cluster template for ECS with Fargate"
+
+
+#--------------#
+#  Parameters  #
+#--------------#
+
 Parameters:
-  ClassB:
-    Description: 'Class B of VPC (10.XXX.0.0/16)'
-    Type: Number
-    Default: 32
-    ConstraintDescription: 'Must be in the range [0-255]'
-    MinValue: 0
-    MaxValue: 255
+  ParentVPCStack:
+    Description: 'Parent VPC Stack name.'
+    Type: String
+
+  ParClusterName:
+    Type: String
+    Default: "Cluster"
+    Description: "Enter a cluster name"
+
+  DomainName:
+    Type: String
+    Default: "caprica.tech"
+    Description: "Enter the domain name of the project"
+
+  Environment:
+    Description: "Select appropriate environment type"
+    Type: String
+    Default: "prod"
+    AllowedValues:
+      - non-prod
+      - prod
+
+  #---- Tag block parameters ----#
+  ParOwner:
+    Type: String
+    Default: "User"
+    Description: "Enter the cluster owner"
+  ParProject:
+    Type: String
+    Default: "DevOps"
+    Description: "Enter project name"
+  #------------------------------#
+
+  #------------------------------------------#
+  # Certificates                             #
+  #------------------------------------------#
+  PrivateCAArn:
+    Type: String
+    Description: The ARN of the PrivateCA
+    Default: "arn:aws:acm:us-east-1:861211186414:certificate/726e2b03-e2c2-4492-b1ca-80c6303f0862"
+
+      
+
+#--------------#
+#  Conditions  #
+#--------------#
+
+Conditions:
+#  CertificateOverrideTrue: !Equals 
+#    - !Ref CertificateOverride
+#    - "true"
+#
+#  CertificateOverrideFalse: !Equals 
+#    - !Ref CertificateOverride
+#    - "false" 
+
+  IsProdEnv: !Equals
+    - !Ref Environment
+    - prod
+  
+  
+#--------------#
+#  Resources   #
+#--------------#
+
 Resources:
-  VPC:
-    Type: 'AWS::EC2::VPC'
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      CidrBlock: !Sub '10.${ClassB}.0.0/16'
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      InstanceTenancy: default
+      GroupName: ALBSecurityGroup  
+      GroupDescription: Allows inbound traffic to ALB and outbound to ECS Service
+      VpcId: {'Fn::ImportValue': !Sub '${ParentVPCStack}-VPC'}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          CidrIp: !If [IsProdEnv, "0.0.0.0/0", "10.0.0.0/16"] 
+          FromPort: 80
+          ToPort: 80
+          Description: "Inbound unencrypted traffic"
+        - IpProtocol: tcp
+          CidrIp: !If [IsProdEnv, "0.0.0.0/0", "10.0.0.0/16"] 
+          FromPort: 80
+          ToPort: 443
+          Description: "Inbound TLS/encrypted traffic"          
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 49191
+          CidrIp: 0.0.0.0/0
+          Description: "Egress to ECS Service"
+      #---- Resource Tag block ----#
       Tags:
-      - Key: Name
-        Value: !Sub 'VPC 10.${ClassB}.0.0/16'
-      - Key: Project
-        Value: IaC Network Stack
-      - Key: Environment
-        Value: Development
-  VPCCidrBlock:
-    Type: 'AWS::EC2::VPCCidrBlock'
+        - Key: "Owner"
+          Value: !Ref ParOwner
+        - Key: "Project"
+          Value: !Ref ParProject
+        - Key: "Name"
+          Value: "ALB Security Group"
+      #----------------------------#
+
+
+  EcsAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      AmazonProvidedIpv6CidrBlock: true
-      VpcId: !Ref VPC
-  InternetGateway:
-    Type: 'AWS::EC2::InternetGateway'
-    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetAPublic'}
+        - {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetBPublic'}        
+        - {'Fn::ImportValue': !Sub '${ParentVPCStack}-SubnetCPublic'}         
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      #---- Resource Tag block ----#
       Tags:
-      - Key: Name
-        Value: !Sub '10.${ClassB}.0.0/16'
-  EgressOnlyInternetGateway:
-    Type: 'AWS::EC2::EgressOnlyInternetGateway'
+        - Key: "Owner"
+          Value: !Ref ParOwner
+        - Key: "Project"
+          Value: !Ref ParProject
+        - Key: "Name"
+          Value: "ECS Application Load Balancer"
+      #----------------------------#
+
+
+  AlbSecureListener:
+   Type: AWS::ElasticLoadBalancingV2::Listener
+   Properties:
+     Certificates: 
+       - CertificateArn: !Ref PrivateCAArn
+     DefaultActions:
+     - Type: "fixed-response"
+       FixedResponseConfig:
+        ContentType: "text/html"
+        MessageBody: "We apologise, but this is a nonexistent service"
+        StatusCode: "503"
+       #TargetGroupArn: !Ref "EcsTg" ## << Placeholder in case one wants to use this directly with TG
+     LoadBalancerArn: !Ref EcsAlb
+     Port: 443
+     Protocol: HTTPS   
+
+  AlbHttplistener: ## << The role of this listener role is to redirect any unencrypted traffic to TLS above
+   Type: "AWS::ElasticLoadBalancingV2::Listener"
+   Properties:
+     DefaultActions:
+       - Type: "redirect"
+         RedirectConfig:
+           Protocol: "HTTPS"
+           Port: 443
+           Host: "#{host}"
+           Path: "/#{path}"
+           Query: "#{query}"
+           StatusCode: "HTTP_301"
+     LoadBalancerArn: !Ref EcsAlb
+     Port: 80
+     Protocol: "HTTP"
+
+
+  #---- ECS Cluster block ----#
+  EcsCluster:
+    Type: AWS::ECS::Cluster
     Properties:
-      VpcId: !Ref VPC
-  VPCGatewayAttachment:
-    Type: 'AWS::EC2::VPCGatewayAttachment'
-    Properties:
-      VpcId: !Ref VPC
-      InternetGatewayId: !Ref InternetGateway
-  SubnetAPublic:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      #AssignIpv6AddressOnCreation: true # TODO can not be set if MapPublicIpOnLaunch is true as well
-      AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.0.0/20'
-      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      MapPublicIpOnLaunch: true
-      VpcId: !Ref VPC
+      ClusterName: !Ref ParClusterName
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      #---- Resource Tag block ----#
+      ## Just a different notation example for Tagging
       Tags:
-      - Key: Name
-        Value: 'A public'
-      - Key: Reach
-        Value: public
-  SubnetAPrivate:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      AssignIpv6AddressOnCreation: false
-      AvailabilityZone: !Select [0, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.16.0/20'
-      Ipv6CidrBlock: !Select [1, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'A private'
-      - Key: Reach
-        Value: private
-  SubnetBPublic:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      #AssignIpv6AddressOnCreation: true # TODO can not be set if MapPublicIpOnLaunch is true as well
-      AvailabilityZone: !Select [1, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.32.0/20'
-      Ipv6CidrBlock: !Select [2, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      MapPublicIpOnLaunch: true
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'B public'
-      - Key: Reach
-        Value: public
-  SubnetBPrivate:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      AssignIpv6AddressOnCreation: false
-      AvailabilityZone: !Select [1, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.48.0/20'
-      Ipv6CidrBlock: !Select [3, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'B private'
-      - Key: Reach
-        Value: private
-  SubnetCPublic:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      #AssignIpv6AddressOnCreation: true # TODO can not be set if MapPublicIpOnLaunch is true as well
-      AvailabilityZone: !Select [2, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.64.0/20'
-      Ipv6CidrBlock: !Select [4, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      MapPublicIpOnLaunch: true
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'C public'
-      - Key: Reach
-        Value: public
-  SubnetCPrivate:
-    DependsOn: VPCCidrBlock
-    Type: 'AWS::EC2::Subnet'
-    Properties:
-      AssignIpv6AddressOnCreation: false
-      AvailabilityZone: !Select [2, !GetAZs '']
-      CidrBlock: !Sub '10.${ClassB}.80.0/20'
-      Ipv6CidrBlock: !Select [5, !Cidr [!Select [0, !GetAtt 'VPC.Ipv6CidrBlocks'], 6, 64]]
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'C private'
-      - Key: Reach
-        Value: private
-  RouteTableAPublic: 
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: Public
-  RouteTableAPrivate: 
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: Private
-  RouteTableBPublic:
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'B Public'
-  RouteTableBPrivate:
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'B Private'
-  RouteTableCPublic:
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'C Public'
-  RouteTableCPrivate:
-    Type: 'AWS::EC2::RouteTable'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: 'C Private'
-  RouteTableAssociationAPublic:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetAPublic
-      RouteTableId: !Ref RouteTableAPublic
-  RouteTableAssociationAPrivate:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetAPrivate
-      RouteTableId: !Ref RouteTableAPrivate
-  RouteTableAssociationBPublic:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetBPublic
-      RouteTableId: !Ref RouteTableBPublic
-  RouteTableAssociationBPrivate:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetBPrivate
-      RouteTableId: !Ref RouteTableBPrivate
-  RouteTableAssociationCPublic:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetCPublic
-      RouteTableId: !Ref RouteTableCPublic
-  RouteTableAssociationCPrivate:
-    Type: 'AWS::EC2::SubnetRouteTableAssociation'
-    Properties:
-      SubnetId: !Ref SubnetCPrivate
-      RouteTableId: !Ref RouteTableCPrivate
-  RouteTablePublicAInternetRoute: # should be RouteTablePublicAInternetRoute, but logical id was not changed for backward compatibility
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableAPublic
-      DestinationCidrBlock: '0.0.0.0/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePublicAInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableAPublic
-      DestinationIpv6CidrBlock: '::/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePrivateAInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    Properties:
-      RouteTableId: !Ref RouteTableAPrivate
-      DestinationIpv6CidrBlock: '::/0'
-      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
-  RouteTablePublicBInternetRoute:
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableBPublic
-      DestinationCidrBlock: '0.0.0.0/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePublicBInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableBPublic
-      DestinationIpv6CidrBlock: '::/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePrivateBInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    Properties:
-      RouteTableId: !Ref RouteTableBPrivate
-      DestinationIpv6CidrBlock: '::/0'
-      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
-  RouteTablePublicCInternetRoute:
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableCPublic
-      DestinationCidrBlock: '0.0.0.0/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePublicCInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    DependsOn: VPCGatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTableCPublic
-      DestinationIpv6CidrBlock: '::/0'
-      GatewayId: !Ref InternetGateway
-  RouteTablePrivateCInternetRouteIPv6:
-    Type: 'AWS::EC2::Route'
-    Properties:
-      RouteTableId: !Ref RouteTableCPrivate
-      DestinationIpv6CidrBlock: '::/0'
-      EgressOnlyInternetGatewayId: !Ref EgressOnlyInternetGateway
-  NetworkAclPublic:
-    Type: 'AWS::EC2::NetworkAcl'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: Public
-  NetworkAclPrivate:
-    Type: 'AWS::EC2::NetworkAcl'
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-      - Key: Name
-        Value: Private
-  SubnetNetworkAclAssociationAPublic:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetAPublic
-      NetworkAclId: !Ref NetworkAclPublic
-  SubnetNetworkAclAssociationAPrivate:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetAPrivate
-      NetworkAclId: !Ref NetworkAclPrivate
-  SubnetNetworkAclAssociationBPublic:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetBPublic
-      NetworkAclId: !Ref NetworkAclPublic
-  SubnetNetworkAclAssociationBPrivate:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetBPrivate
-      NetworkAclId: !Ref NetworkAclPrivate
-  SubnetNetworkAclAssociationCPublic:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetCPublic
-      NetworkAclId: !Ref NetworkAclPublic
-  SubnetNetworkAclAssociationCPrivate:
-    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
-    Properties:
-      SubnetId: !Ref SubnetCPrivate
-      NetworkAclId: !Ref NetworkAclPrivate
-  NetworkAclEntryInPublicAllowAll:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPublic
-      RuleNumber: 99
-      Protocol: -1
-      RuleAction: allow
-      Egress: false
-      CidrBlock: '0.0.0.0/0'
-  NetworkAclEntryInPublicAllowAllIPv6:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPublic
-      RuleNumber: 98
-      Protocol: -1
-      RuleAction: allow
-      Egress: false
-      Ipv6CidrBlock: '::/0'
-  NetworkAclEntryOutPublicAllowAll:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPublic
-      RuleNumber: 99
-      Protocol: -1
-      RuleAction: allow
-      Egress: true
-      CidrBlock: '0.0.0.0/0'
-  NetworkAclEntryOutPublicAllowAllIPv6:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPublic
-      RuleNumber: 98
-      Protocol: -1
-      RuleAction: allow
-      Egress: true
-      Ipv6CidrBlock: '::/0'
-  NetworkAclEntryInPrivateAllowAll:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPrivate
-      RuleNumber: 99
-      Protocol: -1
-      RuleAction: allow
-      Egress: false
-      CidrBlock: '0.0.0.0/0'
-  NetworkAclEntryInPrivateAllowAllIPv6:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPrivate
-      RuleNumber: 98
-      Protocol: -1
-      RuleAction: allow
-      Egress: false
-      Ipv6CidrBlock: '::/0'
-  NetworkAclEntryOutPrivateAllowAll:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPrivate
-      RuleNumber: 99
-      Protocol: -1
-      RuleAction: allow
-      Egress: true
-      CidrBlock: '0.0.0.0/0'
-  NetworkAclEntryOutPrivateAllowAllIPv6:
-    Type: 'AWS::EC2::NetworkAclEntry'
-    Properties:
-      NetworkAclId: !Ref NetworkAclPrivate
-      RuleNumber: 98
-      Protocol: -1
-      RuleAction: allow
-      Egress: true
-      Ipv6CidrBlock: '::/0'
+        -
+          Key: "Owner"
+          Value: !Ref ParOwner
+        -
+          Key: "Project"
+          Value: !Ref ParProject
+      #----------------------------#
+  #---------------------------#    
+          
+          
+#--------------#
+#   Outputs    #
+#--------------#
+
 Outputs:
-  TemplateID:
-    Description: 'VPC com 3 AZs, publica e privada'
-    Value: 'vpc/vpc-3azs'
-  TemplateVersion:
-    Description: 'Template PoC'
-    Value: '1.0.0'
+
+  OutputsEcsCluster:
+    Value:
+      Ref: EcsCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ClusterName"
+    Description: "Name of the ECS cluster"
+                      
+  OutputsAlbArn:
+    Value:
+      Ref: EcsAlb
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsAlbArn"
+    Description: "ECS ALB ARN"   
+    
+  OutputsAlbName:
+    Value: !GetAtt EcsAlb.LoadBalancerFullName
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsAlbName"
+    Description: "Name of the ECS ALB"
+    
+  OutputListenerArn:
+    Value:
+      !Ref AlbSecureListener
+    Description: "Listener ARN"  
+    Export:
+      Name: !Sub "${AWS::StackName}-OutputAlbSecureListener"  
+    
+  OutputDomainName:
+    Value:
+      !Ref DomainName
+    Description: "The domain name of the project"  
+    Export:
+      Name: !Sub "${AWS::StackName}-OutputDomainName"  
+    
+  OutputALBSecurityGroup:
+    Value:
+      !Ref ALBSecurityGroup
+    Description: "Security Group ID of the ALB"
+    Export:
+      Name: !Sub "${AWS::StackName}-OutputALBSecurityGroup"  
+
   StackName:
     Description: 'Stack name.'
     Value: !Sub '${AWS::StackName}'
-  AZs: # Better name would be NumberOfAZs, but we keep the name for backward compatibility
-    Description: 'Number of AZs'
-    Value: 3
-    Export:
-      Name: !Sub '${AWS::StackName}-AZs'
-  AZList:  # Better name would be AZs, but the name was already used
-    Description: 'List of AZs'
-    Value: !Join [',', [!Select [0, !GetAZs ''], !Select [1, !GetAZs ''], !Select [2, !GetAZs '']]]
-    Export:
-      Name: !Sub '${AWS::StackName}-AZList'
-  AZA:
-    Description: 'AZ of A'
-    Value: !Select [0, !GetAZs '']
-    Export:
-      Name: !Sub '${AWS::StackName}-AZA'
-  AZB:
-    Description: 'AZ of B'
-    Value: !Select [1, !GetAZs '']
-    Export:
-      Name: !Sub '${AWS::StackName}-AZB'
-  AZC:
-    Description: 'AZ of C'
-    Value: !Select [2, !GetAZs '']
-    Export:
-      Name: !Sub '${AWS::StackName}-AZC'
-  CidrBlock:
-    Description: 'The set of IP addresses for the VPC.'
-    Value: !GetAtt 'VPC.CidrBlock'
-    Export:
-      Name: !Sub '${AWS::StackName}-CidrBlock'
-  CidrBlockIPv6:
-    Description: 'The set of IPv6 addresses for the VPC.'
-    Value: !Select [0, !GetAtt 'VPC.Ipv6CidrBlocks']
-    Export:
-      Name: !Sub '${AWS::StackName}-CidrBlockIPv6'
-  VPC:
-    Description: 'VPC.'
-    Value: !Ref VPC
-    Export:
-      Name: !Sub '${AWS::StackName}-VPC'
-  InternetGateway:
-    Description: 'InternetGateway.'
-    Value: !Ref InternetGateway
-    Export:
-      Name: !Sub '${AWS::StackName}-InternetGateway'
-  SubnetsPublic:
-    Description: 'Subnets public.'
-    Value: !Join [',', [!Ref SubnetAPublic, !Ref SubnetBPublic, !Ref SubnetCPublic]]
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetsPublic'
-  SubnetsPrivate:
-    Description: 'Subnets private.'
-    Value: !Join [',', [!Ref SubnetAPrivate, !Ref SubnetBPrivate, !Ref SubnetCPrivate]]
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetsPrivate'
-  RouteTablesPrivate:
-    Description: 'Route tables private.'
-    Value: !Join [',', [!Ref RouteTableAPrivate, !Ref RouteTableBPrivate, !Ref RouteTableCPrivate]]
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTablesPrivate'
-  RouteTablesPublic:
-    Description: 'Route tables public.'
-    Value: !Join [',', [!Ref RouteTableAPublic, !Ref RouteTableBPublic, !Ref RouteTableCPublic]]
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTablesPublic'
-  SubnetAPublic:
-    Description: 'Subnet A public.'
-    Value: !Ref SubnetAPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetAPublic'
-  RouteTableAPublic:
-    Description: 'Route table A public.'
-    Value: !Ref RouteTableAPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableAPublic'
-  SubnetAPrivate:
-    Description: 'Subnet A private.'
-    Value: !Ref SubnetAPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetAPrivate'
-  RouteTableAPrivate:
-    Description: 'Route table A private.'
-    Value: !Ref RouteTableAPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableAPrivate'
-  SubnetBPublic:
-    Description: 'Subnet B public.'
-    Value: !Ref SubnetBPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetBPublic'
-  RouteTableBPublic:
-    Description: 'Route table B public.'
-    Value: !Ref RouteTableBPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableBPublic'
-  SubnetBPrivate:
-    Description: 'Subnet B private.'
-    Value: !Ref SubnetBPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetBPrivate'
-  RouteTableBPrivate:
-    Description: 'Route table B private.'
-    Value: !Ref RouteTableBPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableBPrivate'
-  SubnetCPublic:
-    Description: 'Subnet C public.'
-    Value: !Ref SubnetCPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetCPublic'
-  RouteTableCPublic:
-    Description: 'Route table C public.'
-    Value: !Ref RouteTableCPublic
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableCPublic'
-  SubnetCPrivate:
-    Description: 'Subnet C private.'
-    Value: !Ref SubnetCPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-SubnetCPrivate'
-  RouteTableCPrivate:
-    Description: 'Route table C private.'
-    Value: !Ref RouteTableCPrivate
-    Export:
-      Name: !Sub '${AWS::StackName}-RouteTableCPrivate'
-
-  
+         
