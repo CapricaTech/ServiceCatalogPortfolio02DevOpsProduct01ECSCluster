@@ -1,0 +1,9 @@
+{
+	"SchemaVersion": "1.0",
+	"ProductVersionName": "2.0.0",
+	"ProductVersionDescription": "Second version, VPC Product",
+	"ProductType": "CLOUD_FORMATION_TEMPLATE",
+	"Properties": {
+		"TemplateFilePath": "/product.yaml"
+	}
+}
