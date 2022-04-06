@@ -1,7 +1,7 @@
 {
 	"SchemaVersion": "1.0",
-	"ProductVersionName": "2.0.0",
-	"ProductVersionDescription": "Second version, VPC Product",
+	"ProductVersionName": "1.0.0",
+	"ProductVersionDescription": "Elastic Container Service - ECS - Product",
 	"ProductType": "CLOUD_FORMATION_TEMPLATE",
 	"Properties": {
 		"TemplateFilePath": "/product.yaml"
